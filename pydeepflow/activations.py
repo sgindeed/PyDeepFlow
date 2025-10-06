@@ -12,7 +12,7 @@ def _elu(x, device, alpha):
 def _gelu(x, device, alpha):
     return 0.5 * x * (1 + device.tanh(device.sqrt(2 / np.pi) * (x + 0.044715 * x ** 3))) 
 def _swish(x, device, alpha):
-    return x / (1 + device.exp(-x))
+    return x * (1 / (1 + device.exp(-x))) # More stable implementation: x * sigmoid(x)
 def _selu(x, device, alpha):
     lam = 1.0507
     alpha_selu = 1.67326
@@ -56,11 +56,13 @@ def _prelu_derivative(x, device, alpha):
 def _elu_derivative(x, device, alpha):
     return device.where(x > 0, 1, alpha * device.exp(x))
 def _gelu_derivative(x, device, alpha):
-    return 0.5 * (1 + device.tanh(device.sqrt(2 / device.pi) * (x + 0.044715 * x ** 3))) + \
-            0.5 * x * (1 - device.tanh(device.sqrt(2 / device.pi) * (x + 0.044715 * x ** 3)) ** 2)
+    # This is a complex derivative, using a common approximation's derivative
+    term1 = 0.5 * device.tanh(0.7978845608 * (x + 0.044715 * x**3))
+    term2 = (0.3989422804 * x * (1 + 0.134145 * x**2)) / device.cosh(0.7978845608 * (x + 0.044715 * x**3))**2
+    return 0.5 + term1 + term2
 def _swish_derivative(x, device, alpha):
-    sigma = 1 / (1 + device.exp(-x))
-    return sigma + x * sigma * (1 - sigma)
+    sigmoid_x = 1 / (1 + device.exp(-x))
+    return sigmoid_x + x * sigmoid_x * (1 - sigmoid_x)
 def _selu_derivative(x, device, alpha):
     lam = 1.0507
     alpha_selu = 1.67326
@@ -68,32 +70,34 @@ def _selu_derivative(x, device, alpha):
 def _softplus_derivative(x, device, alpha):
     return 1 / (1 + device.exp(-x))
 def _mish_derivative(x, device, alpha):
-    sp = device.log(1 + device.exp(x))
-    tanh_sp = device.tanh(sp)
-    return device.exp(x) * (tanh_sp + x * (1 - tanh_sp ** 2) / sp) / (1 + device.exp(-x))
+    omega = device.exp(3*x) + 4*device.exp(2*x) + (6+4*x)*device.exp(x) + 4*(1+x)
+    delta = 1 + 2*device.exp(x) + 2*device.exp(2*x) + device.exp(3*x)
+    return (device.exp(x) * omega) / (delta**2)
 def _rrelu_derivative(x, device, alpha):
     return device.where(x > 0, 1, alpha)
 def _hardswish_derivative(x, device, alpha):
     return device.where(x > -3, device.where(x < 3, x / 3 + 0.5, 1), 0)
 def _sigmoid_derivative(x, device, alpha):
+    # Assumes x is the output of the sigmoid function, i.e., sigmoid(z)
     return x * (1 - x)
 def _softsign_derivative(x, device, alpha):
     return 1 / (1 + device.abs(x)) ** 2
 def _tanh_derivative(x, device, alpha):
+    # Assumes x is the output of the tanh function, i.e., tanh(z)
     return 1 - x ** 2
 def _hardtanh_derivative(x, device, alpha):
     return device.where(device.abs(x) <= 1, 1, 0)
 def _hardsigmoid_derivative(x, device, alpha):
     return device.where(device.abs(x) <= 1, 0.5, 0)
 def _tanhshrink_derivative(x, device, alpha):
-    return 1 - device.tanh(x) ** 2
+    return device.tanh(x) ** 2
 def _softshrink_derivative(x, device, alpha):
     return device.where(device.abs(x) > alpha, 1, 0)
 def _hardshrink_derivative(x, device, alpha):
     return device.where(device.abs(x) > alpha, 1, 0)
 def _softmax_derivative(x, device, alpha):
+    # Assumes x is the output of the softmax function and used with categorical cross-entropy
     return x * (1 - x)
-
 
 
 ACTIVATION_FUNCTIONS = {
@@ -160,43 +164,20 @@ def activation(x, func, device, alpha=0.01):
         The computational device (CPU or GPU) that handles array operations.
     alpha : float, optional (default=0.01)
         Parameter used for activations like Leaky ReLU, PReLU, and RReLU.
-
+    
     Returns:
     --------
     np.ndarray
         The result of applying the specified activation function to the input data.
-
+    
     Raises:
     -------
     ValueError
         If the specified activation function is unsupported.
-
-    Notes:
-    ------
-    - ReLU (Rectified Linear Unit): Returns 0 for negative inputs, otherwise returns the input value.
-    - Leaky ReLU: Similar to ReLU, but allows a small negative slope (alpha * x) for x < 0.
-    - PReLU (Parametric ReLU): Similar to Leaky ReLU but with a learnable parameter for the negative slope.
-    - ELU (Exponential Linear Unit): Applies exponential transformation for x < 0, linear for x > 0.
-    - GELU (Gaussian Error Linear Unit): Approximates a Gaussian error function. Smooth curve activation.
-    - Swish: Uses sigmoid(x) * x, introducing smooth non-linearity.
-    - SELU: Scaled ELU with fixed scaling factors to promote self-normalization in neural networks.
-    - Softplus: Smooth approximation of ReLU, calculated as log(1 + exp(x)).
-    - Mish: A newer activation that uses x * tanh(softplus(x)).
-    - RReLU (Randomized Leaky ReLU): A randomized variant of Leaky ReLU used mainly for regularization.
-    - HardSwish: Similar to Swish but uses a piecewise linear approximation for faster computation.
-    - Sigmoid: S-shaped curve that maps any input to the range (0, 1).
-    - Softsign: Another S-shaped function, but uses x / (1 + |x|) for smoother transitions.
-    - Tanh: Maps input to the range (-1, 1) with a hyperbolic tangent curve.
-    - HardTanh: Similar to Tanh but clamped to the range [-1, 1].
-    - HardSigmoid: A faster approximation of sigmoid, producing values in the range (0, 1).
-    - Tanhshrink: Subtracts the tanh activation from the input: x - tanh(x).
-    - Softshrink: Shrinks the values towards zero by a threshold of alpha.
-    - Hardshrink: Similar to Softshrink but with hard cutoffs at alpha and -alpha.
-    - Softmax: Maps input to a probability distribution by exponentiating and normalizing the inputs.
     """
     if func not in ACTIVATION_FUNCTIONS:
         raise ValueError(f"Unsupported activation function: {func}")
-    
+   
     return ACTIVATION_FUNCTIONS[func](x, device, alpha)
 
 def activation_derivative(x, func, device, alpha=0.01):
@@ -217,38 +198,16 @@ def activation_derivative(x, func, device, alpha=0.01):
         The computational device (CPU or GPU) that handles array operations.
     alpha : float, optional (default=0.01)
         Parameter used for activations like Leaky ReLU, PReLU, and RReLU.
-
+    
     Returns:
     --------
     np.ndarray
         The derivative of the activation function applied to the input data.
-
+    
     Raises:
     -------
     ValueError
         If the specified activation function's derivative is unsupported.
-
-    Notes:
-    ------
-    - The ReLU derivative is 1 if x > 0, otherwise 0.
-    - The Leaky ReLU derivative is 1 if x > 0, otherwise alpha.
-    - The PReLU derivative is 1 if x > 0, otherwise alpha.
-    - The ELU derivative is 1 if x > 0, otherwise alpha * exp(x).
-    - The GELU derivative is complex but approximated as a smooth function using tanh and polynomials.
-    - The Swish derivative is sigmoid(x) + x * sigmoid'(x).
-    - The SELU derivative is lam if x > 0, otherwise lam * alpha_selu * exp(x).
-    - The Softplus derivative is sigmoid(x).
-    - The Mish derivative is a combination of tanh(softplus(x)) and x.
-    - The RReLU derivative is 1 if x > 0, otherwise alpha.
-    - The HardSwish derivative is a piecewise function that ranges from 0 to 1, depending on x.
-    - The Sigmoid derivative is sigmoid(x) * (1 - sigmoid(x)).
-    - The Softsign derivative is 1 / (1 + |x|)^2.
-    - The Tanh derivative is 1 - tanh(x)^2.
-    - The HardTanh derivative is 1 in the range [-1, 1], otherwise 0.
-    - The HardSigmoid derivative is 0.5 for x in [-1, 1], otherwise 0.
-    - The Tanhshrink derivative is 1 - tanh(x)^2.
-    - The Softshrink and Hardshrink derivatives are 1 where |x| > alpha, otherwise 0.
-    - The Softmax derivative assumes usage with cross-entropy loss, resulting in softmax(x) * (1 - softmax(x)).
     """
     if func not in ACTIVATION_DERIVATIVES:
         raise ValueError(f"Unsupported activation derivative: {func}")
